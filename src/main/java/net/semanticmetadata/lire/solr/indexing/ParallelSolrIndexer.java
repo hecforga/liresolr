@@ -40,10 +40,8 @@
 package net.semanticmetadata.lire.solr.indexing;
 
 import net.semanticmetadata.lire.imageanalysis.features.GlobalFeature;
-import net.semanticmetadata.lire.imageanalysis.features.global.ColorLayout;
-import net.semanticmetadata.lire.imageanalysis.features.global.EdgeHistogram;
-import net.semanticmetadata.lire.imageanalysis.features.global.JCD;
-import net.semanticmetadata.lire.imageanalysis.features.global.PHOG;
+import net.semanticmetadata.lire.imageanalysis.features.global.*;
+import net.semanticmetadata.lire.imageanalysis.features.global.joint.JointHistogram;
 import net.semanticmetadata.lire.indexers.hashing.BitSampling;
 import net.semanticmetadata.lire.indexers.hashing.MetricSpaces;
 import net.semanticmetadata.lire.indexers.parallel.WorkItem;
@@ -113,11 +111,21 @@ public class ParallelSolrIndexer implements Runnable {
     public ParallelSolrIndexer() {
         // default constructor.
         listOfFeatures = new HashSet<Class>();
-        listOfFeatures.add(PHOG.class);
         listOfFeatures.add(ColorLayout.class);
-        listOfFeatures.add(EdgeHistogram.class);
+        listOfFeatures.add(CEDD.class);
+        listOfFeatures.add(FCTH.class);
         listOfFeatures.add(JCD.class);
-
+        listOfFeatures.add(ScalableColor.class);
+        listOfFeatures.add(EdgeHistogram.class);
+        listOfFeatures.add(AutoColorCorrelogram.class);
+        listOfFeatures.add(Tamura.class);
+        listOfFeatures.add(Gabor.class);
+        listOfFeatures.add(SimpleColorHistogram.class);
+        listOfFeatures.add(OpponentHistogram.class);
+        listOfFeatures.add(JointHistogram.class);
+        listOfFeatures.add(LuminanceLayout.class);
+        listOfFeatures.add(PHOG.class);
+        listOfFeatures.add(ACCID.class);
         HashingMetricSpacesManager.init(); // load reference points from disk.
 
     }
@@ -503,10 +511,10 @@ public class ParallelSolrIndexer implements Runnable {
 //                        }
                         // --------< / preprocessing >-------------------------
 
-                        if (maxSideLength > 50)
+                        /*if (maxSideLength > 50)
                             img = ImageUtils.scaleImage(img, maxSideLength); // scales image to 512 max sidelength.
 
-                        else if (img.getWidth() < 32 || img.getHeight() < 32) { // image is too small to be worked with, for now I just do an upscale.
+                        else */if (img.getWidth() < 32 || img.getHeight() < 32) { // image is too small to be worked with, for now I just do an upscale.
                             double scaleFactor = 128d;
                             if (img.getWidth() > img.getHeight()) {
                                 scaleFactor = (128d / (double) img.getWidth());
@@ -526,19 +534,20 @@ public class ParallelSolrIndexer implements Runnable {
                             e.printStackTrace();
                         }
                         // --------< creating doc >-------------------------
+                        String imageId = tmp.getFileName().substring(tmp.getFileName().lastIndexOf("/") + 1, tmp.getFileName().length() - 12); // - 12 because length of "_CROPPED.jpg" is 4
                         sb.append("<doc>");
                         sb.append("<field name=\"id\">");
                         if (idp == null)
-                            sb.append(tmp.getFileName());
+                            sb.append(imageId);
                         else
-                            sb.append(idp.getIdentifier(tmp.getFileName()));
+                            sb.append(idp.getIdentifier(imageId));
                         sb.append("</field>");
-                        sb.append("<field name=\"title\">");
+                        /*sb.append("<field name=\"title\">");
                         if (idp == null)
                             sb.append(tmp.getFileName());
                         else
                             sb.append(idp.getTitle(tmp.getFileName()));
-                        sb.append("</field>");
+                        sb.append("</field>");*/
                         if (idp != null)
                             sb.append(idp.getAdditionalFields(tmp.getFileName()));
 
