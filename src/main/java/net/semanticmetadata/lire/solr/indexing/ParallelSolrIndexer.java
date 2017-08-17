@@ -120,7 +120,7 @@ public class ParallelSolrIndexer implements Runnable {
     Set<Class> listOfFeatures;
 
     ArrayList<File> fileList;
-    File outFile = new File("outfile.xml");
+    File outFile;
     private int monitoringInterval = 10;
     private int maxSideLength = 512;
     private boolean isPreprocessing = true;
@@ -201,6 +201,7 @@ public class ParallelSolrIndexer implements Runnable {
                     System.err.println("Could not set number of threads to 8.");
                     e1.printStackTrace();
                 }
+                e.outFile = new File("outfile_" + category + ".xml");
                 e.run();
                 e.postIndexToServer(gender, category);
                 e.resetGlobalVariables();
@@ -227,7 +228,7 @@ public class ParallelSolrIndexer implements Runnable {
 
     public void postIndexToServer(String gender, String category) {
         try {
-            SolrClient client = new HttpSolrClient.Builder("http://139.59.155.103:8983/solr/"+gender+"_"+category).build();
+            SolrClient client = new HttpSolrClient.Builder("http://54.93.254.52:8983/solr/"+gender+"_"+category).build();
 
             DocumentBuilderFactory dbfac = DocumentBuilderFactory.newInstance();
             DocumentBuilder docBuilder = dbfac.newDocumentBuilder();
@@ -241,7 +242,7 @@ public class ParallelSolrIndexer implements Runnable {
 
             DirectXmlRequest xmlreq = new DirectXmlRequest( "/update", xmlOutput);
             client.deleteByQuery("*:*");
-            //client.request(xmlreq);
+            client.request(xmlreq);
             client.commit();
         }catch (SolrServerException se){
             System.err.println("Caught SolrServerException: " + se.getMessage());
@@ -461,12 +462,13 @@ public class ParallelSolrIndexer implements Runnable {
                             e.printStackTrace();
                         }
                         // --------< creating doc >-------------------------
+                        String imageId = tmp.getFileName().substring(tmp.getFileName().lastIndexOf("/") + 1, tmp.getFileName().length() - 12); // - 12 because length of "_CROPPED.jpg" is 4
                         sb.append("<doc>");
                         sb.append("<field name=\"id\">");
                         if (idp == null)
-                            sb.append(tmp.getFileName());
+                            sb.append(imageId);
                         else
-                            sb.append(idp.getIdentifier(tmp.getFileName()));
+                            sb.append(idp.getIdentifier(imageId));
                         sb.append("</field>");
                         sb.append("<field name=\"title\">");
                         if (idp == null)
