@@ -41,7 +41,6 @@ package net.semanticmetadata.lire.solr.indexing;
 
 import net.semanticmetadata.lire.imageanalysis.features.GlobalFeature;
 import net.semanticmetadata.lire.imageanalysis.features.global.*;
-import net.semanticmetadata.lire.imageanalysis.features.global.joint.JointHistogram;
 import net.semanticmetadata.lire.indexers.hashing.BitSampling;
 import net.semanticmetadata.lire.indexers.hashing.MetricSpaces;
 import net.semanticmetadata.lire.indexers.parallel.WorkItem;
@@ -50,12 +49,27 @@ import net.semanticmetadata.lire.solr.HashingMetricSpacesManager;
 import net.semanticmetadata.lire.utils.ImageUtils;
 
 import javax.imageio.ImageIO;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.*;
 import java.util.concurrent.LinkedBlockingQueue;
+
+import org.apache.solr.client.solrj.SolrClient;
+import org.apache.solr.client.solrj.request.DirectXmlRequest;
+import org.apache.solr.client.solrj.SolrServerException;
+import org.apache.solr.client.solrj.impl.HttpSolrClient;
+import org.apache.solr.common.util.ContentStreamBase;
+import org.w3c.dom.Document;
+
 
 /**
  * This indexing application allows for parallel extraction of global features from multiple image files for
@@ -87,6 +101,10 @@ import java.util.concurrent.LinkedBlockingQueue;
  * @author Mathias Lux, mathias@juggle.at on  13.08.2013
  */
 public class ParallelSolrIndexer implements Runnable {
+
+    private static ArrayList<String> genderList = new ArrayList<String>();
+    private static ArrayList<String> categoryList = new ArrayList<String>();
+
     private final int maxCacheSize = 250;
     //    private static HashMap<Class, String> classToPrefix = new HashMap<Class, String>(5);
     private boolean force = false;
@@ -101,23 +119,25 @@ public class ParallelSolrIndexer implements Runnable {
     OutputStream dos = null;
     Set<Class> listOfFeatures;
 
-    File fileList = null;
-    File outFile = null;
+    ArrayList<File> fileList;
+    File outFile = new File("outfile.xml");
     private int monitoringInterval = 10;
     private int maxSideLength = 512;
     private boolean isPreprocessing = true;
     private Class imageDataProcessor = null;
 
+
     public ParallelSolrIndexer() {
         // default constructor.
+        fileList = new ArrayList<File>();
         listOfFeatures = new HashSet<Class>();
-        listOfFeatures.add(ColorLayout.class);
         listOfFeatures.add(CEDD.class);
         listOfFeatures.add(FCTH.class);
         listOfFeatures.add(JCD.class);
-        listOfFeatures.add(ScalableColor.class);
-        listOfFeatures.add(EdgeHistogram.class);
         listOfFeatures.add(AutoColorCorrelogram.class);
+        /*listOfFeatures.add(ScalableColor.class);
+        listOfFeatures.add(ColorLayout.class);
+        listOfFeatures.add(EdgeHistogram.class);
         listOfFeatures.add(Tamura.class);
         listOfFeatures.add(Gabor.class);
         listOfFeatures.add(SimpleColorHistogram.class);
@@ -125,126 +145,67 @@ public class ParallelSolrIndexer implements Runnable {
         listOfFeatures.add(JointHistogram.class);
         listOfFeatures.add(LuminanceLayout.class);
         listOfFeatures.add(PHOG.class);
-        listOfFeatures.add(ACCID.class);
+        listOfFeatures.add(ACCID.class);*/
         HashingMetricSpacesManager.init(); // load reference points from disk.
 
     }
 
-    /**
-     * Sets the number of consumer threads that are employed for extraction
-     *
-     * @param numberOfThreads
-     */
-    public static void setNumberOfThreads(int numberOfThreads) {
-        ParallelSolrIndexer.numberOfThreads = numberOfThreads;
-    }
-
     public static void main(String[] args) throws IOException {
         BitSampling.readHashFunctions();
-        ParallelSolrIndexer e = new ParallelSolrIndexer();
 
         // parse programs args ...
-        for (int i = 0; i < args.length; i++) {
-            String arg = args[i];
-            if (arg.startsWith("-i")) {
-                // infile ...
-                if ((i + 1) < args.length)
-                    e.setFileList(new File(args[i + 1]));
-                else {
-                    System.err.println("Could not set out file.");
-                    printHelp();
-                }
-            } else if (arg.startsWith("-o")) {
-                // out file, if it's not set a single file for each input image is created.
-                if ((i + 1) < args.length)
-                    e.setOutFile(new File(args[i + 1]));
-                else printHelp();
-            } else if (arg.startsWith("-m")) {
-                // out file
-                if ((i + 1) < args.length) {
-                    try {
-                        int s = Integer.parseInt(args[i + 1]);
-                        if (s > 10)
-                            e.setMaxSideLength(s);
-                    } catch (NumberFormatException e1) {
-                        e1.printStackTrace();
-                        printHelp();
-                    }
-                } else printHelp();
-            } else if (arg.startsWith("-r")) {
-                // image data processor class.
-                if ((i + 1) < args.length) {
-                    try {
-                        Class<?> imageDataProcessorClass = Class.forName(args[i + 1]);
-                        if (imageDataProcessorClass.newInstance() instanceof ImageDataProcessor)
-                            e.setImageDataProcessor(imageDataProcessorClass);
-                    } catch (Exception e1) {
-                        System.err.println("Did not find imageProcessor class: " + e1.getMessage());
-                        printHelp();
-                        System.exit(0);
-                    }
-                } else printHelp();
-            } else if (arg.startsWith("-f") || arg.startsWith("--force")) {
-                e.setForce(true);
-            } else if (arg.startsWith("-y") || arg.startsWith("--features")) {
-                if ((i + 1) < args.length) {
-                    // parse and check the features.
-                    String[] ft = args[i + 1].split(",");
-                    for (int j = 0; j < ft.length; j++) {
-                        String s = ft[j].trim();
-                        if (FeatureRegistry.getClassForCode(s) != null) {
-                            e.addFeature(FeatureRegistry.getClassForCode(s));
-                        }
-                    }
-                }
-            } else if (arg.startsWith("-p")) {
-                e.setPreprocessing(true);
-            } else if (arg.startsWith("-a")) {
-                e.setUseBothHashingAlgortihms(true);
-            } else if (arg.startsWith("-l")) {
-                e.setUseMetricSpaces(true);
-            } else if (arg.startsWith("-h")) {
-                // help
-                printHelp();
-                System.exit(0);
-            } else if (arg.startsWith("-n")) {
-                if ((i + 1) < args.length)
-                    try {
-                        ParallelSolrIndexer.numberOfThreads = Integer.parseInt(args[i + 1]);
-                    } catch (Exception e1) {
-                        System.err.println("Could not set number of threads to \"" + args[i + 1] + "\".");
-                        e1.printStackTrace();
-                    }
-                else printHelp();
+        if (args.length < 3) {
+            System.err.println("Wrong number of arguments. 3 needed. Usage example:\n" +
+                    "home/datsetDirectory mujer all");
+        }
+        else{
+            String genders = args[1];
+            String categories = args[2];
+
+            if(genders.equals("all")){
+
+                genderList.add("mujer");
+                genderList.add("hombre");
+            }else {
+                genderList.add(genders);
+            }
+            if(categories.equals("all")){
+                categoryList.add("abrigos_chaquetas");
+                categoryList.add("camisas_blusas");
+                categoryList.add("camisetas_tops_bodies");
+                categoryList.add("faldas");
+                categoryList.add("monos");
+                categoryList.add("pantalones_cortos");
+                categoryList.add("pantalones_largos");
+                categoryList.add("punto");
+                categoryList.add("sudaderas_jerseis");
+                categoryList.add("vestidos");
+            }else {
+                categoryList.add(categories);
             }
         }
-        // check if there is an infile, an outfile and some features to extract.
-        if (!e.isConfigured()) {
-            printHelp();
-        } else {
-            e.run();
+        String pathToDataset = args[0];
+        for (String gender:genderList) {
+            for (String category:categoryList) {
+                //setFileList
+                ParallelSolrIndexer e = new ParallelSolrIndexer();
+                System.out.println("Empezando con: "+category);
+                File croppedFolder = new File(pathToDataset+"/"+gender+"/"+category+"/CROPPED");
+                File [] croppedFileNames = croppedFolder.listFiles();
+                ArrayList<File> listOfFiles = new ArrayList<File>(Arrays.asList(croppedFileNames));
+                e.appendFileList(listOfFiles);
+                e.setForce(true);
+                try {
+                    ParallelSolrIndexer.numberOfThreads = 8;
+                } catch (Exception e1) {
+                    System.err.println("Could not set number of threads to 8.");
+                    e1.printStackTrace();
+                }
+                e.run();
+                e.postIndexToServer(gender, category);
+                e.resetGlobalVariables();
+            }
         }
-    }
-
-    private static void printHelp() {
-        System.out.println("This help text is shown if you start the ParallelSolrIndexer with the '-h' option.\n" +
-                "\n" +
-                "$> ParallelSolrIndexer -i <infile> [-o <outfile>] [-n <threads>] [-f] [-p] [-l] [-a] [-m <max_side_length>] [-r <full class name>] \\\\ \n" +
-                "         [-y <list of feature classes>]\n" +
-                "\n" +
-                "Note: if you don't specify an outfile just \".xml\" is appended to the input image for output. So there will be one XML\n" +
-                "file per image. Specifying an outfile will collect the information of all images in one single file.\n" +
-                "\n" +
-                "-n ... number of threads should be something your computer can cope with. default is 4.\n" +
-                "-f ... forces overwrite of outfile\n" +
-                "-p ... enables image processing before indexing (despeckle, trim white space)\n" +
-                "-a ... use both BitSampling and MetricSpaces.\n" +
-                "-l ... disables BitSampling and uses MetricSpaces instead.\n" +
-                "-m ... maximum side length of images when indexed. All bigger files are scaled down. default is 512.\n" +
-                "-r ... defines a class implementing net.semanticmetadata.lire.solr.indexing.ImageDataProcessor\n" +
-                "       that provides additional fields.\n" +
-                "-y ... defines which feature classes are to be extracted. default is \"-y ph,cl,eh,jc\". \"-y ce,ac\" would \n" +
-                "       add to the other four features. ");
     }
 
     public static String arrayToString(int[] array) {
@@ -256,71 +217,45 @@ public class ParallelSolrIndexer implements Runnable {
         return sb.toString();
     }
 
-    /**
-     * Adds a feature to the extractor chain. All those features are extracted from images.
-     *
-     * @param feature
-     */
-    public void addFeature(Class feature) {
-        listOfFeatures.add(feature);
+    public void appendFileList(ArrayList<File> fileList) {
+        this.fileList.addAll(fileList);
     }
 
-    /**
-     * Sets the file list for processing. One image file per line is fine.
-     *
-     * @param fileList
-     */
-    public void setFileList(File fileList) {
-        this.fileList = fileList;
+    public void resetGlobalVariables() {
+        fileList.clear();
     }
 
-    /**
-     * Sets the outfile. The outfile has to be in a folder parent to all input images.
-     *
-     * @param outFile
-     */
-    public void setOutFile(File outFile) {
-        this.outFile = outFile;
-    }
+    public void postIndexToServer(String gender, String category) {
+        try {
+            SolrClient client = new HttpSolrClient.Builder("http://139.59.155.103:8983/solr/"+gender+"_"+category).build();
 
-    public void setImageDataProcessor(Class imageDataProcessor) {
-        this.imageDataProcessor = imageDataProcessor;
-    }
+            DocumentBuilderFactory dbfac = DocumentBuilderFactory.newInstance();
+            DocumentBuilder docBuilder = dbfac.newDocumentBuilder();
+            Document doc = docBuilder.parse(outFile);
+            TransformerFactory tf = TransformerFactory.newInstance();
+            Transformer transformer = tf.newTransformer();
+            transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
+            StringWriter writer = new StringWriter();
+            transformer.transform(new DOMSource(doc), new StreamResult(writer));
+            String xmlOutput = writer.getBuffer().toString().replaceAll("\n|\r", "");
 
-    public int getMaxSideLength() {
-        return maxSideLength;
-    }
-
-    public void setMaxSideLength(int maxSideLength) {
-        this.maxSideLength = maxSideLength;
-    }
-
-    private boolean isConfigured() {
-        boolean configured = true;
-        if (fileList == null || !fileList.exists()) configured = false;
-        else if (outFile == null) {
-            individualFiles = true;
-            // create an outfile ...
-//            try {
-//                outFile = new File(fileList.getCanonicalPath() + ".xml");
-//                System.out.println("Setting out file to " + outFile.getCanonicalFile());
-//            } catch (IOException e) {
-//                configured = false;
-//            }
-        } else if (outFile.exists() && !force) {
-            System.err.println(outFile.getName() + " already exists. Please delete or choose another outfile.");
-            configured = false;
+            DirectXmlRequest xmlreq = new DirectXmlRequest( "/update", xmlOutput);
+            client.deleteByQuery("*:*");
+            //client.request(xmlreq);
+            client.commit();
+        }catch (SolrServerException se){
+            System.err.println("Caught SolrServerException: " + se.getMessage());
+        }catch (IOException e){
+            System.err.println("Caught IOException: " + e.getMessage());
+        } catch (Exception e) {
+            System.err.println(e.getMessage());
         }
-        if (imageDataProcessor == null) {
-            imageDataProcessor = SimpleBackslashReplacer.class;
-        }
-        return configured;
     }
 
     @Override
     public void run() {
         // check:
-        if (fileList == null || !fileList.exists()) {
+        if (fileList == null) {
             System.err.println("No text file with a list of images given.");
             return;
         }
@@ -426,40 +361,32 @@ public class ParallelSolrIndexer implements Runnable {
 
     class Producer implements Runnable {
         public void run() {
-            try {
-                BufferedReader br = new BufferedReader(new FileReader(fileList));
-                String file = null;
-                File next = null;
-                while ((file = br.readLine()) != null) {
-                    next = new File(file);
-                    try {
-                        // reading from harddrive to buffer to reduce the load on the HDD and move decoding to the
-                        // consumers using java.nio
-                        int fileSize = (int) next.length();
-                        byte[] buffer = new byte[fileSize];
-                        FileInputStream fis = new FileInputStream(next);
-                        FileChannel channel = fis.getChannel();
-                        MappedByteBuffer map = channel.map(FileChannel.MapMode.READ_ONLY, 0, fileSize);
-                        map.load();
-                        map.get(buffer);
-                        String path = next.getCanonicalPath();
-                        images.put(new WorkItem(path, buffer));
-                    } catch (Exception e) {
-                        System.err.println("Could not read image " + file + ": " + e.getMessage());
-                    }
-                }
-                for (int i = 0; i < numberOfThreads*2; i++) {
-                    String tmpString = null;
-                    byte[] tmpImg = null;
-                    try {
-                        images.put(new WorkItem(tmpString, tmpImg));
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
-                }
 
-            } catch (IOException e) {
-                e.printStackTrace();
+            for(File next: fileList) {
+                try {
+                    // reading from harddrive to buffer to reduce the load on the HDD and move decoding to the
+                    // consumers using java.nio
+                    int fileSize = (int) next.length();
+                    byte[] buffer = new byte[fileSize];
+                    FileInputStream fis = new FileInputStream(next);
+                    FileChannel channel = fis.getChannel();
+                    MappedByteBuffer map = channel.map(FileChannel.MapMode.READ_ONLY, 0, fileSize);
+                    map.load();
+                    map.get(buffer);
+                    String path = next.getCanonicalPath();
+                    images.put(new WorkItem(path, buffer));
+                } catch (Exception e) {
+                    System.err.println("Could not read image " + next.getName() + ": " + e.getMessage());
+                }
+            }
+            for (int i = 0; i < numberOfThreads*2; i++) {
+                String tmpString = null;
+                byte[] tmpImg = null;
+                try {
+                    images.put(new WorkItem(tmpString, tmpImg));
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
             }
             ended = true;
         }
@@ -507,14 +434,14 @@ public class ParallelSolrIndexer implements Runnable {
 //                            // despeckle
 //                            DespeckleFilter df = new DespeckleFilter();
 //                            img = df.filter(img, null);
-                            img = ImageUtils.trimWhiteSpace(img); // trims white space
+                        img = ImageUtils.trimWhiteSpace(img); // trims white space
 //                        }
                         // --------< / preprocessing >-------------------------
 
-                        /*if (maxSideLength > 50)
+                        if (maxSideLength > 50)
                             img = ImageUtils.scaleImage(img, maxSideLength); // scales image to 512 max sidelength.
 
-                        else */if (img.getWidth() < 32 || img.getHeight() < 32) { // image is too small to be worked with, for now I just do an upscale.
+                        else if (img.getWidth() < 32 || img.getHeight() < 32) { // image is too small to be worked with, for now I just do an upscale.
                             double scaleFactor = 128d;
                             if (img.getWidth() > img.getHeight()) {
                                 scaleFactor = (128d / (double) img.getWidth());
@@ -534,20 +461,19 @@ public class ParallelSolrIndexer implements Runnable {
                             e.printStackTrace();
                         }
                         // --------< creating doc >-------------------------
-                        String imageId = tmp.getFileName().substring(tmp.getFileName().lastIndexOf("/") + 1, tmp.getFileName().length() - 12); // - 12 because length of "_CROPPED.jpg" is 4
                         sb.append("<doc>");
                         sb.append("<field name=\"id\">");
                         if (idp == null)
-                            sb.append(imageId);
+                            sb.append(tmp.getFileName());
                         else
-                            sb.append(idp.getIdentifier(imageId));
+                            sb.append(idp.getIdentifier(tmp.getFileName()));
                         sb.append("</field>");
-                        /*sb.append("<field name=\"title\">");
+                        sb.append("<field name=\"title\">");
                         if (idp == null)
                             sb.append(tmp.getFileName());
                         else
                             sb.append(idp.getTitle(tmp.getFileName()));
-                        sb.append("</field>");*/
+                        sb.append("</field>");
                         if (idp != null)
                             sb.append(idp.getAdditionalFields(tmp.getFileName()));
 
