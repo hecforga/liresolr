@@ -43,17 +43,16 @@ import net.semanticmetadata.lire.imageanalysis.features.GlobalFeature;
 import net.semanticmetadata.lire.imageanalysis.features.global.*;
 import net.semanticmetadata.lire.indexers.hashing.BitSampling;
 import net.semanticmetadata.lire.indexers.hashing.MetricSpaces;
-import net.semanticmetadata.lire.indexers.parallel.WorkItem;
 import net.semanticmetadata.lire.solr.FeatureRegistry;
 import net.semanticmetadata.lire.solr.HashingMetricSpacesManager;
 import net.semanticmetadata.lire.utils.ImageUtils;
 
 import javax.imageio.ImageIO;
+import javax.json.*;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.transform.OutputKeys;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.transform.*;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import java.awt.image.BufferedImage;
@@ -67,8 +66,8 @@ import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.request.DirectXmlRequest;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.impl.HttpSolrClient;
-import org.apache.solr.common.util.ContentStreamBase;
 import org.w3c.dom.Document;
+import org.xml.sax.SAXException;
 
 
 /**
@@ -100,112 +99,229 @@ import org.w3c.dom.Document;
  *
  * @author Mathias Lux, mathias@juggle.at on  13.08.2013
  */
-public class ParallelSolrIndexer implements Runnable {
+public class ParallelSolrIndexer {
+    private final static int maxCacheSize = 250;
+    private final static int numberOfThreads = 8;
+    private final static int monitoringInterval = 10;
+    private final static int maxSideLength = 512;
+    private final static boolean useMetricSpaces = false;
+    private final static boolean useBitSampling = true;
 
-    private static ArrayList<String> genderList = new ArrayList<String>();
-    private static ArrayList<String> categoryList = new ArrayList<String>();
+    private LinkedBlockingQueue<Product> products = new LinkedBlockingQueue<>(maxCacheSize);
+    private boolean ended = false;
+    private int overallCount = 0;
+    private OutputStream dos;
+    private Set<Class> featuresSet;
 
-    private final int maxCacheSize = 250;
-    //    private static HashMap<Class, String> classToPrefix = new HashMap<Class, String>(5);
-    private boolean force = false;
-    private static boolean individualFiles = false;
-    private static int numberOfThreads = 8;
+    private File outfile;
 
-    private boolean useMetricSpaces = false, useBitSampling = true;
+    private String datasetPath;
 
-    LinkedBlockingQueue<WorkItem> images = new LinkedBlockingQueue<WorkItem>(maxCacheSize);
-    boolean ended = false;
-    int overallCount = 0;
-    OutputStream dos = null;
-    Set<Class> listOfFeatures;
+    private List<String> gendersList;
+    private List<String> categoriesList;
+    private List<String> shopsList;
 
-    ArrayList<File> fileList;
-    File outFile;
-    private int monitoringInterval = 10;
-    private int maxSideLength = 512;
-    private boolean isPreprocessing = true;
-    private Class imageDataProcessor = null;
+    private String gender, category;
 
+    private List<String> previousProductsList;
+    private List<Product> newProductsList;
 
     public ParallelSolrIndexer() {
-        // default constructor.
-        fileList = new ArrayList<File>();
-        listOfFeatures = new HashSet<Class>();
-        listOfFeatures.add(CEDD.class);
-        listOfFeatures.add(FCTH.class);
-        listOfFeatures.add(JCD.class);
-        listOfFeatures.add(AutoColorCorrelogram.class);
-        /*listOfFeatures.add(ScalableColor.class);
-        listOfFeatures.add(ColorLayout.class);
-        listOfFeatures.add(EdgeHistogram.class);
-        listOfFeatures.add(Tamura.class);
-        listOfFeatures.add(Gabor.class);
-        listOfFeatures.add(SimpleColorHistogram.class);
-        listOfFeatures.add(OpponentHistogram.class);
-        listOfFeatures.add(JointHistogram.class);
-        listOfFeatures.add(LuminanceLayout.class);
-        listOfFeatures.add(PHOG.class);
-        listOfFeatures.add(ACCID.class);*/
+        featuresSet = new HashSet<>();
+        featuresSet.add(CEDD.class);
+        featuresSet.add(FCTH.class);
+        featuresSet.add(JCD.class);
+        featuresSet.add(AutoColorCorrelogram.class);
+
         HashingMetricSpacesManager.init(); // load reference points from disk.
 
+        previousProductsList = new ArrayList<>();
+        newProductsList = new ArrayList<>();
     }
 
     public static void main(String[] args) throws IOException {
         BitSampling.readHashFunctions();
+        ParallelSolrIndexer indexer = new ParallelSolrIndexer();
 
-        // parse programs args ...
-        if (args.length < 3) {
+        if (args.length < 4) {
             System.err.println("Wrong number of arguments. 3 needed. Usage example:\n" +
-                    "home/datsetDirectory mujer all");
+                    "home/path/to/dataset mujer all");
+            System.exit(1);
         }
-        else{
-            String genders = args[1];
-            String categories = args[2];
 
-            if(genders.equals("all")){
+        indexer.setDatasetPath(args[0]);
 
-                genderList.add("mujer");
-                genderList.add("hombre");
-            }else {
-                genderList.add(genders);
-            }
-            if(categories.equals("all")){
-                categoryList.add("abrigos_chaquetas");
-                categoryList.add("camisas_blusas");
-                categoryList.add("camisetas_tops_bodies");
-                categoryList.add("faldas");
-                categoryList.add("monos");
-                categoryList.add("pantalones_cortos");
-                categoryList.add("pantalones_largos");
-                categoryList.add("punto");
-                categoryList.add("sudaderas_jerseis");
-                categoryList.add("vestidos");
-            }else {
-                categoryList.add(categories);
-            }
+        indexer.configureGendersList(args[1]);
+        if (indexer.gendersList.isEmpty()) {
+            System.err.println("Invalid gender argument supplied");
+            System.exit(1);
         }
-        String pathToDataset = args[0];
-        for (String gender:genderList) {
-            for (String category:categoryList) {
-                //setFileList
-                ParallelSolrIndexer e = new ParallelSolrIndexer();
-                System.out.println("Empezando con: "+category);
-                File croppedFolder = new File(pathToDataset+"/"+gender+"/"+category+"/CROPPED");
-                File [] croppedFileNames = croppedFolder.listFiles();
-                ArrayList<File> listOfFiles = new ArrayList<File>(Arrays.asList(croppedFileNames));
-                e.appendFileList(listOfFiles);
-                e.setForce(true);
-                try {
-                    ParallelSolrIndexer.numberOfThreads = 8;
-                } catch (Exception e1) {
-                    System.err.println("Could not set number of threads to 8.");
-                    e1.printStackTrace();
+        indexer.configureCategoriesList(args[2]);
+        if (indexer.categoriesList.isEmpty()) {
+            System.err.println("Invalid category argument supplied");
+            System.exit(1);
+        }
+        indexer.configureShopsList(args[3]);
+        if (indexer.shopsList.isEmpty()) {
+            System.err.println("Invalid shop argument supplied");
+            System.exit(1);
+        }
+
+        for (String gender : indexer.gendersList) {
+            indexer.gender = gender;
+            for (String category : indexer.categoriesList) {
+                System.out.println("Empezando con: " + category);
+                indexer.category = category;
+                String categoryFolderPath = indexer.datasetPath + "/" + gender + "/" + category;
+
+                indexer.initOutfile(categoryFolderPath, category);
+
+                indexer.newProductsList.clear();
+                for (String shop: indexer.shopsList) {
+                    indexer.configurePreviousProductsList(shop);
+
+                    indexer.configureNewProductsList(shop);
                 }
-                e.outFile = new File("outfile_" + category + ".xml");
-                e.run();
-                e.postIndexToServer(gender, category);
-                e.resetGlobalVariables();
+
+                if (!indexer.previousProductsList.isEmpty()) {
+                    indexer.dos.write("<delete>\n".getBytes());
+                    indexer.writeIdsToDelete();
+                    indexer.dos.write("</delete>\n".getBytes());
+                }
+
+                if (!indexer.newProductsList.isEmpty()) {
+                    indexer.dos.write("<add>\n".getBytes());
+                    indexer.writeDocumentsToAdd();
+                    indexer.dos.write("</add>\n".getBytes());
+                }
+
+                indexer.closeOutfile();
+
+                if (!indexer.previousProductsList.isEmpty() || !indexer.newProductsList.isEmpty()) {
+                    indexer.postIndexToServer();
+                }
             }
+        }
+    }
+
+    private void setDatasetPath(String datasetPath) {
+        this.datasetPath = datasetPath;
+    }
+
+    private void configureGendersList(String genderArgument) {
+        String[] allGenders = { "hombre", "mujer" };
+
+        gendersList = new ArrayList<>();
+        if (Arrays.asList(allGenders).contains(genderArgument)) {
+            gendersList.add(genderArgument);
+        } else {
+            if (genderArgument.equals("all")) {
+                gendersList.addAll(Arrays.asList(allGenders));
+            }
+        }
+    }
+
+    private void configureCategoriesList(String categoryArgument) {
+        String[] allCategories = {
+                "abrigos_chaquetas",
+                "camisas_blusas",
+                "camisetas",
+                "faldas",
+                "monos",
+                "pantalones_cortos",
+                "pantalones_largos",
+                "punto",
+                "sudaderas_jerseis",
+                "tops_bodies",
+                "vestidos"
+        };
+
+        categoriesList = new ArrayList<>();
+        if (Arrays.asList(allCategories).contains(categoryArgument)) {
+            categoriesList.add(categoryArgument);
+        } else {
+            if (categoryArgument.equals("all")) {
+                categoriesList.addAll(Arrays.asList(allCategories));
+            }
+        }
+    }
+
+    private void configureShopsList(String shopArgument) {
+        String[] allShops = {
+                "asos",
+                "laredoute",
+                "mango",
+                "pullandbear",
+                "zara"
+        };
+
+        shopsList = new ArrayList<>();
+        if (Arrays.asList(allShops).contains(shopArgument)) {
+            shopsList.add(shopArgument);
+        } else {
+            if (shopArgument.equals("all")) {
+                shopsList.addAll(Arrays.asList(allShops));
+            }
+        }
+    }
+
+    private void configurePreviousProductsList(String shop) throws FileNotFoundException {
+        String previousProductsFilePath = datasetPath + "/" + gender + "/" + category + "/" + shop + "/products" + "/previous_products.json";
+        previousProductsList.addAll(extractListFromJsonFile(previousProductsFilePath));
+    }
+
+    private void configureNewProductsList(String shop) throws FileNotFoundException {
+        String newProductsFilePath = datasetPath + "/" + gender + "/" + category + "/" + shop + "/products" + "/new_products.json";
+        List<String> newProductsIdsList = extractListFromJsonFile(newProductsFilePath);
+
+        for (String productId : newProductsIdsList) {
+            Product newProduct = new Product(productId, gender, category, shop);
+            newProductsList.add(newProduct);
+        }
+    }
+
+    private static List<String> extractListFromJsonFile(String filePath) throws FileNotFoundException {
+        JsonReader newProductsJsonReader = Json.createReader(new FileReader(filePath));
+        JsonArray jsonArray = newProductsJsonReader.readArray();
+        newProductsJsonReader.close();
+        return jsonArray.getValuesAs(JsonString::getString);
+    }
+
+    private void initOutfile(String categoryFolderPath, String category) throws IOException {
+        outfile = new File(categoryFolderPath + "/outfile_" + category + ".xml");
+        dos = new BufferedOutputStream(new FileOutputStream(outfile), 1024 * 1024 * 8);
+    }
+
+    private void closeOutfile() throws IOException {
+        dos.close();
+    }
+
+    private void writeIdsToDelete() throws IOException {
+        for (String productId : previousProductsList) {
+            dos.write(("<id>" + productId + "</id>\n").getBytes());
+        }
+    }
+
+    private void postIndexToServer() {
+        try {
+            SolrClient client = new HttpSolrClient.Builder("http://54.93.254.52:8983/solr/" + gender + "_" + category).build();
+            //SolrClient client = new HttpSolrClient.Builder("http://54.93.254.52:8983/solr/prueba").build();
+
+            DocumentBuilderFactory dbfac = DocumentBuilderFactory.newInstance();
+            DocumentBuilder docBuilder = dbfac.newDocumentBuilder();
+            Document doc = docBuilder.parse(outfile);
+            TransformerFactory tf = TransformerFactory.newInstance();
+            Transformer transformer = tf.newTransformer();
+            transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
+            StringWriter writer = new StringWriter();
+            transformer.transform(new DOMSource(doc), new StreamResult(writer));
+            String xmlOutput = writer.getBuffer().toString().replaceAll("[\n\r]", "");
+
+            DirectXmlRequest xmlreq = new DirectXmlRequest( "/update", xmlOutput);
+            client.request(xmlreq);
+            client.commit();
+        } catch (SolrServerException | IOException | TransformerException | SAXException | ParserConfigurationException e){
+            e.printStackTrace();
         }
     }
 
@@ -218,140 +334,93 @@ public class ParallelSolrIndexer implements Runnable {
         return sb.toString();
     }
 
-    public void appendFileList(ArrayList<File> fileList) {
-        this.fileList.addAll(fileList);
-    }
-
-    public void resetGlobalVariables() {
-        fileList.clear();
-    }
-
-    public void postIndexToServer(String gender, String category) {
-        try {
-            SolrClient client = new HttpSolrClient.Builder("http://54.93.254.52:8983/solr/"+gender+"_"+category).build();
-
-            DocumentBuilderFactory dbfac = DocumentBuilderFactory.newInstance();
-            DocumentBuilder docBuilder = dbfac.newDocumentBuilder();
-            Document doc = docBuilder.parse(outFile);
-            TransformerFactory tf = TransformerFactory.newInstance();
-            Transformer transformer = tf.newTransformer();
-            transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
-            StringWriter writer = new StringWriter();
-            transformer.transform(new DOMSource(doc), new StreamResult(writer));
-            String xmlOutput = writer.getBuffer().toString().replaceAll("\n|\r", "");
-
-            DirectXmlRequest xmlreq = new DirectXmlRequest( "/update", xmlOutput);
-            client.deleteByQuery("*:*");
-            client.request(xmlreq);
-            client.commit();
-        }catch (SolrServerException se){
-            System.err.println("Caught SolrServerException: " + se.getMessage());
-        }catch (IOException e){
-            System.err.println("Caught IOException: " + e.getMessage());
-        } catch (Exception e) {
-            System.err.println(e.getMessage());
-        }
-    }
-
-    @Override
-    public void run() {
-        // check:
-        if (fileList == null) {
-            System.err.println("No text file with a list of images given.");
-            return;
-        }
+    private void writeDocumentsToAdd() {
         System.out.println("Extracting features: ");
-        for (Iterator<Class> iterator = listOfFeatures.iterator(); iterator.hasNext(); ) {
-            System.out.println("\t" + iterator.next().getCanonicalName());
+        for (Class listOfFeature : featuresSet) {
+            System.out.println("\t" + listOfFeature.getCanonicalName());
         }
+
         try {
-            if (!individualFiles) {
-                // create a BufferedOutputStream with a large buffer
-                dos = new BufferedOutputStream(new FileOutputStream(outFile), 1024 * 1024 * 8);
-                dos.write("<add>\n".getBytes());
-            }
+            ended = false;
+            overallCount = 0;
             Thread p = new Thread(new Producer(), "Producer");
             p.start();
-            LinkedList<Thread> threads = new LinkedList<Thread>();
+
+            LinkedList<Thread> threads = new LinkedList<>();
             long l = System.currentTimeMillis();
             for (int i = 0; i < numberOfThreads; i++) {
                 Thread c = new Thread(new Consumer(), "Consumer-" + i);
                 c.start();
                 threads.add(c);
             }
+
             Thread m = new Thread(new Monitoring(), "Monitoring");
             m.start();
-            for (Iterator<Thread> iterator = threads.iterator(); iterator.hasNext(); ) {
-                iterator.next().join();
+
+            for (Thread thread : threads) {
+                thread.join();
             }
+            p.join();
+            m.join();
             long l1 = System.currentTimeMillis() - l;
             System.out.println("Analyzed " + overallCount + " images in " + l1 / 1000 + " seconds, ~" + (overallCount > 0 ? (l1 / overallCount) : "inf.") + " ms each.");
-            if (!individualFiles) {
-                dos.write("</add>\n".getBytes());
-                dos.close();
-            }
-//            writer.commit();
-//            writer.close();
-//            threadFinished = true;
-
         } catch (Exception e) {
             e.printStackTrace();
         }
-
     }
 
-    private void addFeatures(List features) {
-        for (Iterator<Class> iterator = listOfFeatures.iterator(); iterator.hasNext(); ) {
-            Class next = iterator.next();
-            try {
-                features.add(next.newInstance());
-            } catch (InstantiationException e) {
-                e.printStackTrace();
-            } catch (IllegalAccessException e) {
-                e.printStackTrace();
-            }
+    class Product {
+        String productId;
+        String gender;
+        String category;
+        String shop;
+        String price;
+        byte[] buffer;
+
+        Product() {
+            productId = null;
         }
-    }
 
-    public void setUseMetricSpaces(boolean useMetricSpaces) {
-        this.useMetricSpaces = useMetricSpaces;
-        this.useBitSampling = !useMetricSpaces;
-    }
+        Product(String productId, String gender, String category, String shop) throws FileNotFoundException {
+            this.productId = productId;
+            this.gender = gender;
+            this.category = category;
+            this.shop = shop;
 
-    public boolean isPreprocessing() {
-        return isPreprocessing;
-    }
+            generateInfoFromJson();
+        }
 
-    public void setPreprocessing(boolean isPreprocessing) {
-        this.isPreprocessing = isPreprocessing;
-    }
+        String getCroppedImagePath() {
+            return datasetPath + "/" + this.gender + "/" + this.category + "/CROPPED/" + productId + "_CROPPED.png";
+        }
 
-    public boolean isForce() {
-        return force;
-    }
+        void generateInfoFromJson() throws FileNotFoundException {
+            String jsonFilePath = datasetPath + "/" + this.gender + "/" + this.category + "/" + shop + "/products/" + productId + "/" + productId + ".json";
 
-    public void setForce(boolean force) {
-        this.force = force;
-    }
+            JsonReader jsonReader = Json.createReader(new FileReader(jsonFilePath));
+            JsonObject jsonObject = jsonReader.readObject();
+            jsonReader.close();
 
-    public void setUseBothHashingAlgortihms(boolean useBothHashingAlgortihms) {
-        this.useMetricSpaces = useBothHashingAlgortihms;
-        this.useBitSampling = useBothHashingAlgortihms;
+            price = jsonObject.getString("price");
+        }
+
+        void setBuffer(byte[] buffer) {
+            this.buffer = buffer;
+        }
     }
 
     class Monitoring implements Runnable {
         public void run() {
             long ms = System.currentTimeMillis();
             try {
-                Thread.sleep(1000 * monitoringInterval); // wait xx seconds
+                Thread.sleep(1000 * monitoringInterval);
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
             while (!ended) {
                 try {
-                    // print the current status:
                     long time = System.currentTimeMillis() - ms;
-                    System.out.println("Analyzed " + overallCount + " images in " + time / 1000 + " seconds, " + ((overallCount > 0) ? (time / overallCount) : "n.a.") + " ms each (" + images.size() + " images currently in queue).");
+                    System.out.println("Analyzed " + overallCount + " images in " + time / 1000 + " seconds, " + ((overallCount > 0) ? (time / overallCount) : "n.a.") + " ms each (" + products.size() + " images currently in queue).");
                     Thread.sleep(1000 * monitoringInterval); // wait xx seconds
                 } catch (InterruptedException e) {
                     e.printStackTrace();
@@ -362,29 +431,28 @@ public class ParallelSolrIndexer implements Runnable {
 
     class Producer implements Runnable {
         public void run() {
-
-            for(File next: fileList) {
+            for(Product next: newProductsList) {
                 try {
+                    File croppedImage = new File(next.getCroppedImagePath());
                     // reading from harddrive to buffer to reduce the load on the HDD and move decoding to the
                     // consumers using java.nio
-                    int fileSize = (int) next.length();
+                    int fileSize = (int) croppedImage.length();
                     byte[] buffer = new byte[fileSize];
-                    FileInputStream fis = new FileInputStream(next);
+                    FileInputStream fis = new FileInputStream(croppedImage);
                     FileChannel channel = fis.getChannel();
                     MappedByteBuffer map = channel.map(FileChannel.MapMode.READ_ONLY, 0, fileSize);
                     map.load();
                     map.get(buffer);
-                    String path = next.getCanonicalPath();
-                    images.put(new WorkItem(path, buffer));
+                    Product product = new Product(next.productId, next.gender, next.category, next.shop);
+                    product.setBuffer(buffer);
+                    products.put(product);
                 } catch (Exception e) {
-                    System.err.println("Could not read image " + next.getName() + ": " + e.getMessage());
+                    System.err.println("Could not read image " + next.getCroppedImagePath() + ": " + e.getMessage());
                 }
             }
-            for (int i = 0; i < numberOfThreads*2; i++) {
-                String tmpString = null;
-                byte[] tmpImg = null;
+            for (int i = 0; i < numberOfThreads; i++) {
                 try {
-                    images.put(new WorkItem(tmpString, tmpImg));
+                    products.put(new Product());
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
@@ -394,27 +462,32 @@ public class ParallelSolrIndexer implements Runnable {
     }
 
     class Consumer implements Runnable {
-        WorkItem tmp = null;
-        LinkedList<GlobalFeature> features = new LinkedList<GlobalFeature>();
+        Product tmp = null;
+        LinkedList<GlobalFeature> features = new LinkedList<>();
         int count = 0;
         boolean locallyEnded = false;
         StringBuilder sb = new StringBuilder(1024);
 
         Consumer() {
-            addFeatures(features);
+            addFeatures();
+        }
+
+        private void addFeatures() {
+            for (Class next : featuresSet) {
+                try {
+                    features.add((GlobalFeature) next.newInstance());
+                } catch (InstantiationException | IllegalAccessException e) {
+                    e.printStackTrace();
+                }
+            }
         }
 
         public void run() {
             while (!locallyEnded) {
                 try {
-                    // we wait for the stack to be either filled or empty & not being filled any more.
-                    // make sure the thread locally knows that the end has come (outer loop)
-//                    if (images.peek().getBuffer() == null)
-//                        locallyEnded = true;
-                    // well the last thing we want is an exception in the very last round.
                     if (!locallyEnded) {
-                        tmp = images.take();
-                        if (tmp.getBuffer() == null)
+                        tmp = products.take();
+                        if (tmp.productId == null)
                             locallyEnded = true;
                         else {
                             count++;
@@ -424,20 +497,13 @@ public class ParallelSolrIndexer implements Runnable {
 
                     if (!locallyEnded) {
                         sb.delete(0, sb.length());
-                        ByteArrayInputStream b = new ByteArrayInputStream(tmp.getBuffer());
+                        ByteArrayInputStream b = new ByteArrayInputStream(tmp.buffer);
 
                         // reads the image. Make sure twelve monkeys lib is in the path to read all jpegs and tiffs.
                         BufferedImage read = ImageIO.read(b);
-                        // --------< preprocessing >-------------------------
-//                        // converts color space to INT_RGB
+                        // converts color space to INT_RGB
                         BufferedImage img = ImageUtils.createWorkingCopy(read);
-//                        if (isPreprocessing) {
-//                            // despeckle
-//                            DespeckleFilter df = new DespeckleFilter();
-//                            img = df.filter(img, null);
                         img = ImageUtils.trimWhiteSpace(img); // trims white space
-//                        }
-                        // --------< / preprocessing >-------------------------
 
                         if (maxSideLength > 50)
                             img = ImageUtils.scaleImage(img, maxSideLength); // scales image to 512 max sidelength.
@@ -452,32 +518,18 @@ public class ParallelSolrIndexer implements Runnable {
                             img = ImageUtils.scaleImage(img, ((int) (scaleFactor * img.getWidth())), (int) (scaleFactor * img.getHeight()));
                         }
 
-                        ImageDataProcessor idp = null;
-                        try {
-                            if (imageDataProcessor != null) {
-                                idp = (ImageDataProcessor) imageDataProcessor.newInstance();
-                            }
-                        } catch (Exception e) {
-                            System.err.println("Could not instantiate ImageDataProcessor!");
-                            e.printStackTrace();
-                        }
                         // --------< creating doc >-------------------------
-                        String imageId = tmp.getFileName().substring(tmp.getFileName().lastIndexOf("/") + 1, tmp.getFileName().length() - 12); // - 12 because length of "_CROPPED.jpg" is 4
+                        String imageId =  tmp.productId;
                         sb.append("<doc>");
                         sb.append("<field name=\"id\">");
-                        if (idp == null)
-                            sb.append(imageId);
-                        else
-                            sb.append(idp.getIdentifier(imageId));
+                        sb.append(imageId);
                         sb.append("</field>");
-                        sb.append("<field name=\"title\">");
-                        if (idp == null)
-                            sb.append(tmp.getFileName());
-                        else
-                            sb.append(idp.getTitle(tmp.getFileName()));
+                        sb.append("<field name=\"shop\">");
+                        sb.append(tmp.shop);
                         sb.append("</field>");
-                        if (idp != null)
-                            sb.append(idp.getAdditionalFields(tmp.getFileName()));
+                        sb.append("<field name=\"price\">");
+                        sb.append(tmp.price);
+                        sb.append("</field>");
 
                         for (GlobalFeature feature : features) {
                             String featureCode = FeatureRegistry.getCodeForClass(feature.getClass());
@@ -487,45 +539,31 @@ public class ParallelSolrIndexer implements Runnable {
                                 String hashesField = FeatureRegistry.codeToHashField(featureCode);
                                 String metricSpacesField = FeatureRegistry.codeToMetricSpacesField(featureCode);
 
-                                sb.append("<field name=\"" + histogramField + "\">");
+                                sb.append("<field name=\"").append(histogramField).append("\">");
                                 sb.append(Base64.getEncoder().encodeToString(feature.getByteArrayRepresentation()));
                                 sb.append("</field>");
                                 if (useBitSampling) {
-                                    sb.append("<field name=\"" + hashesField + "\">");
+                                    sb.append("<field name=\"").append(hashesField).append("\">");
                                     sb.append(arrayToString(BitSampling.generateHashes(feature.getFeatureVector())));
                                     sb.append("</field>");
                                 }
                                 if (useMetricSpaces && MetricSpaces.supportsFeature(feature)) {
-                                    sb.append("<field name=\"" + metricSpacesField + "\">");
+                                    sb.append("<field name=\"").append(metricSpacesField).append("\">");
                                     sb.append(MetricSpaces.generateHashString(feature));
                                     sb.append("</field>");
                                 }
                             }
                         }
                         sb.append("</doc>\n");
-
                         // --------< / creating doc >-------------------------
 
                         // finally write everything to the stream - in case no exception was thrown..
-                        if (!individualFiles) {
-                            synchronized (dos) {
-                                dos.write(sb.toString().getBytes());
-                                // dos.flush();  // flushing takes too long ... better not.
-                            }
-                        } else {
-                            OutputStream mos = new BufferedOutputStream(new FileOutputStream(tmp.getFileName() + "_solr.xml"));
-                            mos.write(sb.toString().getBytes());
-                            mos.flush();
-                            mos.close();
+                        synchronized (dos) {
+                            dos.write(sb.toString().getBytes());
                         }
                     }
-//                    if (!individualFiles) {
-//                        synchronized (dos) {
-//                            dos.write(buffer.toString().getBytes());
-//                        }
-//                    }
                 } catch (Exception e) {
-                    System.err.println("Error processing file " + tmp.getFileName());
+                    System.err.println("Error processing file " + tmp.getCroppedImagePath());
                     e.printStackTrace();
                 }
             }
